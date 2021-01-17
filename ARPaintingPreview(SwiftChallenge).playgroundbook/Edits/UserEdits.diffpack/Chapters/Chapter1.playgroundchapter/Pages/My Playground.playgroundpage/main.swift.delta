@@ -1,0 +1,313 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Diff</key>
+	<array>
+		<dict>
+			<key>ModifiedContent</key>
+			<string>/* A playground where you can select an Image and view it on a Wall in AR
+ *Author: Rostislav Iskandirov
+ *Device: Ipad Pro 11 2018 with Swift-Playgrounds 3.3
+ */
+
+//import the necessary library's 
+import PlaygroundSupport
+import SwiftUI
+import RealityKit
+import ARKit
+
+//helping function to get document directory usage: convert UIImage to Texture 
+func getDocumentsDirectory() -&gt; URL {
+    let paths = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
+    return paths[0]
+}
+
+// ARWrapper to allow the usage of SwiftUi and AR 
+struct ARViewWrapper: UIViewRepresentable{
+    
+    typealias UIViewType = ARView
+    
+    // variables
+    @Binding var userImage:UIImage
+    @Binding var newImageChoosen:Bool
+    
+    
+    // func to use the coordinator 
+    func makeCoordinator() -&gt; ARCoordinator {
+        return ARCoordinator(parent: self)
+    }
+    
+    func makeUIView(context: UIViewRepresentableContext&lt;ARViewWrapper&gt;) -&gt; ARView {
+        // make the ARView
+        let arView = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
+        // create configuration for vertical plane detection 
+        let config = ARWorldTrackingConfiguration()
+        config.planeDetection = .vertical
+        arView.session.run(config)
+        //enable the coordinator
+        arView.session.delegate = context.coordinator 
+        arView.debugOptions.insert(.showFeaturePoints)
+            // call the placement function
+        arView.enablePlacement()
+        arView.enableRemoval()
+        
+        
+        return arView
+    }
+    
+    func updateUIView(_ uiView: ARView, context: UIViewRepresentableContext&lt;ARViewWrapper&gt;) {
+        //pass
+    }
+    
+}
+
+// Coordinator class for the ArWrapper 
+class ARCoordinator: NSObject, ARSessionDelegate{
+    
+    let parent: ARViewWrapper
+    
+    init(parent: ARViewWrapper){ self.parent = parent }
+}
+
+//Extension to ARView to allow touch-gestures
+extension ARView{
+    
+    // func to enable placement of the "Painting"
+    func enablePlacement(){
+        //TapGestureRecognizer to get the screenTaps
+        let tapGestureRecogizer = UITapGestureRecognizer(target: self, action: #selector(handleTap(recognizer:)))
+        self.addGestureRecognizer(tapGestureRecogizer)
+    }
+    
+    // function to create the the ModelEntity 
+    func createModel(image: UIImage, newImage: Binding&lt;Bool&gt;)-&gt; ModelEntity{
+        
+        // check image size to determine the start canvas size 
+        let width = Float(image.size.width)
+        let height = Float(image.size.height)
+        
+        let divider:Float = height &gt;= 1000 &amp;&amp; width &gt;= 1000 ? 10000.0: 1000
+        
+        
+        // generate "canvas" with the image dimensions 
+        let mesh = MeshResource.generateBox(width: width/divider, height: 0.01, depth: height/divider)
+        // save UIImage to load it as a textureResource
+        let filename = getDocumentsDirectory().appendingPathComponent("texture.jpeg")
+        //only save Image if changed
+        if(newImage.wrappedValue){
+            if let data = image.jpegData(compressionQuality: 0.6) {
+            print(data)
+            try? data.write(to: filename)
+            }}
+        
+        // create material 
+        var material = UnlitMaterial()
+            // load texture and assaign it to the material
+        material.baseColor = try! MaterialColorParameter.texture(TextureResource.load(contentsOf: filename))
+        
+        
+        return ModelEntity(mesh: mesh, materials: [material])
+    }
+    
+    // the objC handler function 
+    @objc func handleTap(recognizer: UITapGestureRecognizer){
+        // get the coordiantor from delegate 
+        guard let coordinator = self.session.delegate as? ARCoordinator else{
+            print("Error obtaining coordinator")
+            return 
+        }
+        print(self.scene.anchors)
+        // get location via raycast 
+        let location = recognizer.location(in: self)
+        //returns a array of result we take the first 
+        let results = self.raycast(from: location, allowing: .estimatedPlane, alignment: .vertical)
+        if let firstResult = results.first{
+            // create the modelEntity
+             let modelEntity = createModel(image: coordinator.parent.userImage, newImage: coordinator.parent.$newImageChoosen )
+            // create the AnchorEntity
+             let anchorEntity = AnchorEntity(world:firstResult.worldTransform)
+             
+             // add model to anchor 
+             anchorEntity.addChild(modelEntity, preservingWorldTransform: true)
+             
+             // add anchor to scene 
+             self.scene.addAnchor(anchorEntity)
+            
+                // generate collision shapes to enable gestures to control the "painting"
+            modelEntity.generateCollisionShapes(recursive: true)
+            
+                // install the gestures
+            self.installGestures([.translation, .scale, .rotation],for: modelEntity)
+                // set the bool to false so only if a new Image is seleted it will "save"
+            coordinator.parent.newImageChoosen = false
+            
+            
+            
+            
+        }else{
+            print("No Surface detected - move around ")
+        }
+        
+    }
+    
+    // function to remove the "paintings" via 3TapGesture
+    func enableRemoval(){
+        let ThreeTapRecognizer = UITapGestureRecognizer(target: self, action: #selector(handleThreeTap(recognizer:)))
+        ThreeTapRecognizer.numberOfTouchesRequired = 3
+        self.addGestureRecognizer(ThreeTapRecognizer)
+    }
+    // the handler func for the long presses
+    @objc func handleThreeTap(recognizer: UITapGestureRecognizer){
+        let location = recognizer.location(in: self)
+        // check for entity in the location and remove the anchor 
+        if let entitity = self.entity(at: location){
+            if let anchorEntity = entitity.anchor{
+                anchorEntity.removeFromParent()
+                print("Removed Painting")
+            }
+        }
+    }
+    
+}
+
+// Imagepicker
+
+struct ImagePickerView: UIViewControllerRepresentable{
+    
+    typealias UIViewControllerType = UIViewController
+    
+    //Bindings 
+    // To toggle the View
+    @Binding var isPresented: Bool
+    // the selected Image
+    @Binding var choosenImage: UIImage
+    // bool to check if new image is selected
+    @Binding var newImageChoosen:Bool
+    
+    // coordinator class
+    class ImageCoordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate{
+        let parent: ImagePickerView
+        init(parent: ImagePickerView){self.parent = parent}
+        
+        // function for the "image-picking"
+        func imagePickerController(_ picker: UIImagePickerController, didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]) {
+            if let selectedImage = info[.originalImage] as? UIImage{
+                print(selectedImage)
+                self.parent.choosenImage = selectedImage
+                self.parent.newImageChoosen = true
+            }
+            self.parent.isPresented = false
+        }
+    
+    }
+    
+    // func for the Coordinator 
+    func makeCoordinator() -&gt; ImageCoordinator {
+        return ImageCoordinator(parent: self)
+    }
+    
+    func makeUIViewController(context: UIViewControllerRepresentableContext&lt;ImagePickerView&gt;) -&gt; UIViewController {
+        // make a Controller 
+        let controller = UIImagePickerController()
+        // assign the coordinator 
+        controller.delegate = context.coordinator
+        return controller
+    }
+    
+    func updateUIViewController(_ uiViewController: UIViewController, context: UIViewControllerRepresentableContext&lt;ImagePickerView&gt;) {
+        //pass
+    }
+}
+
+// the  MainView 
+struct ContenView: View {
+    //States 
+    // to toggle the Imagepicker
+    @State var isShowingImagePicker = false
+    // the Image as a State 
+    @State var image = #imageLiteral(resourceName: "IMG_0335.JPG")
+    // bool that says when new image is choosen 
+    @State var newImage = true
+    
+    
+    var body: some View{
+        ZStack(alignment: .bottomTrailing, content: {
+            ARViewWrapper(userImage: self.$image, newImageChoosen: self.$newImage)
+            UIView(isShowingImagePicker: self.$isShowingImagePicker, showImage: self.$image, newImageChoosen: self.$newImage)
+            
+            .sheet(isPresented: self.$isShowingImagePicker, content: {
+                ImagePickerView(isPresented: self.$isShowingImagePicker, choosenImage: self.$image, newImageChoosen: self.$newImage)
+            })
+            
+        }).background(Color.black)
+    }
+    
+}
+
+//The UI subview
+struct UIView: View{
+    // Binding for the Imagepicker toggle
+    @Binding var isShowingImagePicker:Bool
+    // Binding for the image 
+    @Binding var showImage:UIImage
+    // bool to tell arview if new image is selected
+    @Binding var newImageChoosen:Bool
+    
+    
+    
+    var body: some View{
+        
+            HStack{
+                VStack(alignment : .leading){
+                    Image(uiImage: showImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 80 , height: 80)
+                        .border(Color.black, width: 1)
+                        .clipped()
+                        
+                    Button(action: {
+                        self.isShowingImagePicker.toggle()
+                        
+                    }, label: {
+                        HStack{
+                            Image(systemName: "arrow.up.doc")
+                            Text("Select Image")
+                                .font(.system(size:12))
+                        }
+                        .frame(minWidth: 0, maxWidth: .infinity)
+                    .padding(.all,10)
+                    .background(Color.white)
+                        
+                    .border(Color.black, width:1)
+                        
+                    })
+                    
+                }
+                VStack(alignment: .leading){
+                    Text("Select an image and place it on the wall ").multilineTextAlignment(.leading)
+                    Text("You can move, rotate and scale your image and remove it with a 3-Finger-Tap")
+                }.foregroundColor(.white)
+                
+            }
+        }
+    
+    
+}
+
+// show the screen in Playground 
+PlaygroundPage.current.setLiveView(ContenView())
+</string>
+			<key>ModifiedRange</key>
+			<string>{1, 10448}</string>
+			<key>OriginalContent</key>
+			<string></string>
+			<key>OriginalRange</key>
+			<string>{1, 0}</string>
+		</dict>
+	</array>
+	<key>File</key>
+	<string>Chapters/Chapter1.playgroundchapter/Pages/My Playground.playgroundpage/main.swift</string>
+</dict>
+</plist>
